@@ -1,21 +1,30 @@
 // var app = chrome.runtime.getBackgroundPage();
+//function bgCall(){
+//	chrome.tabs.executeScript({
+//		file: 'alert.js'
+//	}); 
+//}
+
+let requiredBuild = '';
 
 //Get Site info on startup
 if (localStorage['site'] === undefined) getLocalIP();
 
 function logTimeForPasswordReset() {
 	$('#bCreateTicket').attr('disabled','disabled');
-	setTimeout(function(){$('#bCreateTicket').removeAttr('disabled');}, 5000);
+	setTimeout( () => $('#bCreateTicket').removeAttr('disabled'), 5000);
 	
 	//Make sure there is a value in the text field
 	if ($("#agentUsername")[0].value != "") { 
 		//Reset user's password in Univention
 		if($("#wantsReset").prop("checked")){
 			chrome.cookies.getAll({domain: "10.0.35.19", name: "UMCSessionId"}, function(cookie){
+				//They don't send cookie info via x-authorization headers anymore
+				//They send cookie info via the Cookie header -- need to find a way to set that with a chrome extension!
 				var jsonData = {
 					"options": [{
 						"object": {
-							"password": ($("#isTraining").prop("checked")) ? "training" : "cxp2017", 
+							"password": ($("#isTraining").prop("checked")) ? "training" : "cxp2018!",
 							"$dn$": `uid=${$("#agentUsername")[0].value},cn=users,dc=connexionpoint,dc=local`, 
 							"pwdChangeNextLogin": ($("#isFlagged").prop("checked") && $("#isTraining").prop("checked") === false) ? true : false, 
 							"overridePWLength": true, 
@@ -24,15 +33,67 @@ function logTimeForPasswordReset() {
 					}], 
 					"flavor": "users/user"
 				};
-				
+
+				//TODO: can I inject this ajax directly into Univention page?
+                // chrome.tabs.query({title: 'ucs-master*'}, function(res) {
+                 //    console.log(res[0]);
+                 //    chrome.tabs.executeScript(res[0].id, {code: ajaxCode}, function(res){
+                //
+                 //    })
+                // });
+
+                $.ajax({
+                    url: "https://10.0.35.19/univention/command/udm/put",
+                    contentType: "application/json",
+                    dataType: "json",
+                    headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie[0].value}` },
+                    data: JSON.stringify(jsonData),
+                    method: "POST",
+                    async: false,
+                    xhrFields: {withCredentials: true},
+                    success: function(data){
+                        console.log("Successfully reset password.");
+                        if ($("#isFlagged").prop("checked") && $("#isTraining").prop("checked") === false) {
+                            let flagData = {
+                                "options": [{
+                                    "object": {
+                                        "$dn$": `uid=${$("#agentUsername")[0].value},cn=users,dc=connexionpoint,dc=local`,
+                                        "pwdChangeNextLogin": true
+                                    }
+                                }],
+                                "flavor": "users/user"
+                            };
+
+                            $.ajax({
+                                url: "https://10.0.35.19/univention/command/udm/put",
+                                contentType: "application/json",
+                                dataType: "json",
+                                headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie[0].value}` },
+                                data: JSON.stringify(flagData),
+                                method: "POST",
+                                success: function(data){
+                                    console.log("Successfully flagged password.");
+                                },
+                                error: function(){
+                                    console.log("Failed to flag password.");
+                                }
+                            });
+                        }
+                    },
+                    error: function(){
+                        console.log("Failed to reset password.");
+                    }
+                });//End of $.ajax
+
 				$.ajax({
 					url: "https://10.0.35.19/univention/command/udm/put", 
 					contentType: "application/json",
 					dataType: "json",
-					headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie.value}` },
+					headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie[0].value}` },
 					data: JSON.stringify(jsonData), 
 					method: "POST",
 					async: false,
+                    xhrFields: {withCredentials: true},
 					success: function(data){
 						console.log("Successfully reset password.");
 						if ($("#isFlagged").prop("checked") && $("#isTraining").prop("checked") === false) {
@@ -50,7 +111,7 @@ function logTimeForPasswordReset() {
 								url: "https://10.0.35.19/univention/command/udm/put", 
 								contentType: "application/json",
 								dataType: "json",
-								headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie.value}` },
+								headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${cookie[0].value}` },
 								data: JSON.stringify(flagData), 
 								method: "POST",
 								success: function(data){
@@ -66,19 +127,22 @@ function logTimeForPasswordReset() {
 						console.log("Failed to reset password.");
 					}
 				});//End of $.ajax
+
 			});//End of chrome.cookies
 		}//End of resetting UNI password
 
 		//Grab access token from Axosoft cookie to make API call
 		chrome.cookies.get({url: "https://connexionpoint.axosoft.com/", name: "client_oauth_token"}, function(cookie){
 			//Grab user info to push into ticket
+
 			var token = cookie.value;
 			var data = getAxoUserInfo(cookie.value);
 			data.token = cookie.value;
 			
 			//Create ticket
 			var ticketNo = createTicket(data); //Returns number without SRX, f.ex. 238596
-
+			if(!ticketNo) return;
+			
 			//Log time in ticket
 			logTimeIntoTicket(data, ticketNo);
 			
@@ -116,14 +180,13 @@ function getAxoUserInfo(token) {
 function createTicket(data){
 	var agent = $("#agentUsername")[0].value;
 	var ticketNo;
-	
 	var ticket = {
-  "notify_customer": false,
-  "item": {
+	"notify_customer": false,
+	"item": {
     "name": `Password Reset for ${agent}`,
     "description": "password reset",
     "notes": "",
-    "resolution": `${($("#isFlagged").prop("checked") && $("#isTraining").prop("checked") === false) ? "Flagged and " : ""}reset password for ${agent} to ${($("#isTraining").prop("checked")) ? "training" : "cxp2017"}`,
+    "resolution": `${($("#isFlagged").prop("checked") && $("#isTraining").prop("checked") === false) ? "Flagged and " : ""}reset password for ${agent} to ${($("#isTraining").prop("checked")) ? "training" : "cxp2018!"}`,
     "replication_procedures": "",
     "percent_complete": 100,
 	"archived": false,
@@ -133,8 +196,8 @@ function createTicket(data){
     "reported_date": null,
     "start_date": null,
     "assigned_to": {
-      "id": data.id,
-      "type": "user"
+      "id": data.id//,
+      //"type": "user"
     },
     "escalation_level": {
       "id": 0
@@ -227,10 +290,14 @@ function createTicket(data){
       "custom_195": ""
     }
   }
-}
+};
+
+    chrome.cookies.get({url: "https://connexionpoint.axosoft.com/", name: "buildNum"}, function(cookie){
+        requiredBuild = cookie.value;
+    });
 
 	$.ajax({
-		url: `https://connexionpoint.axosoft.com/api/v6/incidents/?require_build=11337`, 
+		url: `https://connexionpoint.axosoft.com/api/v6/incidents/?require_build=${requiredBuild}`,
 		contentType: "application/json",
 		dataType: "json",
 		headers: { "Content-Type":"application/json","Accept": "application/json","X-Authorization": `OAuth ${data.token}` },
@@ -240,9 +307,15 @@ function createTicket(data){
 		success: function(jsonData){
 			ticketNo = (jsonData['data']['number']).substr(3);
 			console.log("createTicket success!");
+		},
+		error: function(xhr, status, error){
+			ticketNo = null;
+			console.log("createTicket failed.");
+			console.log(status);
+			console.log(error);
 		}
 	});
-	
+
 	return ticketNo;
 }
 
@@ -262,7 +335,7 @@ function logTimeIntoTicket(userData, ticketNo){
 	};
 	
 	$.ajax({
-		url: `https://connexionpoint.axosoft.com/api/v6/work_logs/?require_build=11337`, 
+		url: `https://connexionpoint.axosoft.com/api/v6/work_logs/?require_build=${requiredBuild}`,
 		contentType: "application/json",
 		headers: { "X-Authorization": `OAuth ${userData.token}` },
 		data: JSON.stringify(timeLog), 
@@ -299,13 +372,7 @@ function getLocalIP(){
 function getDateTime(isTimeLog){
 	var d = new Date();
 	if (isTimeLog) d.setTime(d.getTime() + 25200000)
-	return `${d.getYear()+1900}-${(d.getMonth()+1 < 10) ? "0"+d.getMonth()+1 : d.getMonth()+1}-${(d.getDate() < 10) ? "0"+d.getDate() : d.getDate() }T${(d.getHours() < 10) ? "0"+d.getHours() : d.getHours()}:${(d.getMinutes() < 10) ? "0"+d.getMinutes() : d.getMinutes()}:${(d.getSeconds() < 10) ? "0"+d.getSeconds() : d.getSeconds()}Z`;
-}
-
-function bgCall(){
-	chrome.tabs.executeScript({
-		file: 'alert.js'
-	}); 
+	return `${d.getYear()+1900}-${(d.getMonth()+1 < 10) ? "0"+(d.getMonth()+1) : d.getMonth()+1}-${(d.getDate() < 10) ? "0"+d.getDate() : d.getDate() }T${(d.getHours() < 10) ? "0"+d.getHours() : d.getHours()}:${(d.getMinutes() < 10) ? "0"+d.getMinutes() : d.getMinutes()}:${(d.getSeconds() < 10) ? "0"+d.getSeconds() : d.getSeconds()}Z`;
 }
 	
 document.getElementById('bCreateTicket').addEventListener('click', logTimeForPasswordReset);
